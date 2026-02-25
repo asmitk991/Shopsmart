@@ -1,0 +1,32 @@
+{
+  "name": "shopsmart",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "lint": "eslint 'client/src/**/*.{js,jsx}' 'server/**/*.js' --max-warnings=0",
+    "lint:fix": "eslint 'client/src/**/*.{js,jsx}' 'server/**/*.js' --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:e2e": "playwright test",
+    "test:e2e:report": "playwright test --reporter=html",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.1",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react": "^7.34.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.2.7",
+    "prettier": "^3.2.5"
+  },
+  "lint-staged": {
+    "*.{js,jsx}": [
+      "eslint --fix --max-warnings=0",
+      "prettier --write"
+    ],
+    "*.{json,md,yml,yaml}": [
+      "prettier --write"
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+node_modules
+.DS_Store
+.env
+dist
+build
+coverage
+.vercel
+test-results
+.terraform
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+server/test.db
+server/dev.db
+server/prisma/dev.db
+data
+logs
