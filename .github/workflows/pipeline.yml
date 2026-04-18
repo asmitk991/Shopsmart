@@ -1,0 +1,193 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  tests:
+    name: Run All Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install & test server
+        run: |
+          npm ci --prefix server
+          npm run prisma:migrate --prefix server
+          npm run test:ci --prefix server
+        env:
+          DATABASE_URL: file:./test.db
+          JWT_SECRET: test-secret-key
+
+      - name: Install & test client
+        run: |
+          npm ci --prefix client
+          npm run test:ci --prefix client
+
+      - name: Upload all test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            server/test-results/
+            server/coverage/
+            client/test-results/
+            client/coverage/
+
+  terraform_apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: tests
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.0
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -var="db_password=${{ secrets.DB_PASSWORD }}" -out=tfplan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+  build_and_push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: terraform_apply
+    outputs:
+      server_image: ${{ steps.meta-server.outputs.tags }}
+      client_image: ${{ steps.meta-client.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push server image
+        id: meta-server
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE=$ECR_REGISTRY/shopsmart-server:$IMAGE_TAG
+          docker build -t $IMAGE ./server
+          docker push $IMAGE
+          echo "tags=$IMAGE" >> $GITHUB_OUTPUT
+
+      - name: Build & push client image
+        id: meta-client
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE=$ECR_REGISTRY/shopsmart-client:$IMAGE_TAG
+          docker build -t $IMAGE ./client
+          docker push $IMAGE
+          echo "tags=$IMAGE" >> $GITHUB_OUTPUT
+
+  deploy_to_ecs:
+    name: Deploy to ECS Fargate
+    runs-on: ubuntu-latest
+    needs: build_and_push
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Force new deployment - server
+        run: |
+          aws ecs update-service \
+            --cluster shopsmart-cluster \
+            --service shopsmart-server \
+            --force-new-deployment \
+            --region ${{ secrets.AWS_REGION }}
+
+      - name: Force new deployment - client
+        run: |
+          aws ecs update-service \
+            --cluster shopsmart-cluster \
+            --service shopsmart-client \
+            --force-new-deployment \
+            --region ${{ secrets.AWS_REGION }}
+
+      - name: Wait for server service stability
+        run: |
+          aws ecs wait services-stable \
+            --cluster shopsmart-cluster \
+            --services shopsmart-server \
+            --region ${{ secrets.AWS_REGION }}
+
+      - name: Wait for client service stability
+        run: |
+          aws ecs wait services-stable \
+            --cluster shopsmart-cluster \
+            --services shopsmart-client \
+            --region ${{ secrets.AWS_REGION }}
+
+      - name: Smoke test - health check
+        run: |
+          TASK_ARN=$(aws ecs list-tasks \
+            --cluster shopsmart-cluster \
+            --service-name shopsmart-server \
+            --query 'taskArns[0]' --output text \
+            --region ${{ secrets.AWS_REGION }})
+          ENI=$(aws ecs describe-tasks \
+            --cluster shopsmart-cluster \
+            --tasks $TASK_ARN \
+            --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' \
+            --output text --region ${{ secrets.AWS_REGION }})
+          PUBLIC_IP=$(aws ec2 describe-network-interfaces \
+            --network-interface-ids $ENI \
+            --query 'NetworkInterfaces[0].Association.PublicIp' \
+            --output text --region ${{ secrets.AWS_REGION }})
+          echo "Server public IP: $PUBLIC_IP"
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$PUBLIC_IP:5001/api/health || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Attempt $i: got $STATUS, retrying in 10s..."
+            sleep 10
+          done
+          echo "Health check failed after 10 attempts"
+          exit 1
