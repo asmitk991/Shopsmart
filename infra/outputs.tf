@@ -14,18 +14,14 @@ output "ecs_cluster_name" {
   value = aws_ecs_cluster.main.name
 }
 
-output "ecs_server_service_name" {
-  value = aws_ecs_service.server.name
-}
-
-output "ecs_client_service_name" {
-  value = aws_ecs_service.client.name
+output "ecs_service_name" {
+  value = aws_ecs_service.app.name
 }
 
 output "ecs_log_group_name" {
   value = aws_cloudwatch_log_group.ecs.name
 }
 
-output "ecs_server_container_name" {
+output "server_container_name" {
   value = "server"
 }

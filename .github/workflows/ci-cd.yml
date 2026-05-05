@@ -58,13 +58,6 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Validate Learner Lab session
-        run: |
-          if ! aws sts get-caller-identity; then
-            echo "Learner Lab AWS session appears to be expired. Refresh voclabs credentials and update GitHub secrets."
-            exit 1
-          fi
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -75,354 +68,57 @@ jobs:
         working-directory: infra
 
       - name: Terraform Apply
+        run: terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
         working-directory: infra
-        timeout-minutes: 10
-        continue-on-error: false
-        run: terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}" -var="jwt_secret=${{ secrets.JWT_SECRET }}"
 
       - name: Get Infrastructure Outputs
         id: infra_out
-        working-directory: infra
         run: |
-          echo "cluster_name=$(terraform output -raw ecs_cluster_name)" >> "$GITHUB_OUTPUT"
-          echo "server_service=$(terraform output -raw ecs_server_service_name)" >> "$GITHUB_OUTPUT"
-          echo "client_service=$(terraform output -raw ecs_client_service_name)" >> "$GITHUB_OUTPUT"
-          echo "server_log_group=$(terraform output -raw ecs_log_group_name)" >> "$GITHUB_OUTPUT"
-          echo "server_container_name=$(terraform output -raw ecs_server_container_name)" >> "$GITHUB_OUTPUT"
+          echo "cluster_name=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_OUTPUT
+          echo "service_name=$(terraform output -raw ecs_service_name)" >> $GITHUB_OUTPUT
+          echo "server_ecr=$(terraform output -raw ecr_server_url)" >> $GITHUB_OUTPUT
+          echo "client_ecr=$(terraform output -raw ecr_client_url)" >> $GITHUB_OUTPUT
+        working-directory: infra
 
       - name: Login to ECR
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Resolve active ECR repositories from ECS services
-        id: ecr_repos
+      - name: Build & push images
+        env:
+          SERVER_REPO: ${{ steps.infra_out.outputs.server_ecr }}
+          CLIENT_REPO: ${{ steps.infra_out.outputs.client_ecr }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker build -t $SERVER_REPO:$TAG ./server
+          docker push $SERVER_REPO:$TAG
+          docker build -t $CLIENT_REPO:$TAG ./client
+          docker push $CLIENT_REPO:$TAG
+
+      - name: Deploy to ECS
         env:
           CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
-          SERVER_SERVICE: ${{ steps.infra_out.outputs.server_service }}
-          CLIENT_SERVICE: ${{ steps.infra_out.outputs.client_service }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
+          SERVICE: ${{ steps.infra_out.outputs.service_name }}
         run: |
-          set -euo pipefail
+          aws ecs update-service --cluster $CLUSTER --service $SERVICE --force-new-deployment --region ${{ secrets.AWS_REGION }}
+          aws ecs wait services-stable --cluster $CLUSTER --services $SERVICE --region ${{ secrets.AWS_REGION }}
 
-          SERVER_TASK_DEF_ARN=$(aws ecs describe-services \
-            --cluster "$CLUSTER" \
-            --services "$SERVER_SERVICE" \
-            --region "$AWS_REGION" \
-            --query 'services[0].taskDefinition' \
-            --output text)
-
-          CLIENT_TASK_DEF_ARN=$(aws ecs describe-services \
-            --cluster "$CLUSTER" \
-            --services "$CLIENT_SERVICE" \
-            --region "$AWS_REGION" \
-            --query 'services[0].taskDefinition' \
-            --output text)
-
-          SERVER_IMAGE=$(aws ecs describe-task-definition \
-            --task-definition "$SERVER_TASK_DEF_ARN" \
-            --region "$AWS_REGION" \
-            --query 'taskDefinition.containerDefinitions[?name==`server`].image | [0]' \
-            --output text)
-
-          CLIENT_IMAGE=$(aws ecs describe-task-definition \
-            --task-definition "$CLIENT_TASK_DEF_ARN" \
-            --region "$AWS_REGION" \
-            --query 'taskDefinition.containerDefinitions[?name==`client`].image | [0]' \
-            --output text)
-
-          echo "server_repo=${SERVER_IMAGE%:*}" >> "$GITHUB_OUTPUT"
-          echo "client_repo=${CLIENT_IMAGE%:*}" >> "$GITHUB_OUTPUT"
-          echo "server_task_def=$SERVER_TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
-          echo "client_task_def=$CLIENT_TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
-
-      - name: Build & push server image
-        id: push-server
-        env:
-          ECR_REPO: ${{ steps.ecr_repos.outputs.server_repo }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker build -t "$ECR_REPO:$IMAGE_TAG" ./server
-          docker push "$ECR_REPO:$IMAGE_TAG"
-          echo "image_uri=$ECR_REPO:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Build & push client image
-        id: push-client
-        env:
-          ECR_REPO: ${{ steps.ecr_repos.outputs.client_repo }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker build -t "$ECR_REPO:$IMAGE_TAG" ./client
-          docker push "$ECR_REPO:$IMAGE_TAG"
-
-          echo "image_uri=$ECR_REPO:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Register server task definition revision
-        id: server-taskdef
+      - name: Smoke test
         env:
           CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
-          SERVER_SERVICE: ${{ steps.infra_out.outputs.server_service }}
-          CURRENT_TASK_DEF_ARN: ${{ steps.ecr_repos.outputs.server_task_def }}
-          SERVER_IMAGE: ${{ steps.push-server.outputs.image_uri }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
+          SERVICE: ${{ steps.infra_out.outputs.service_name }}
         run: |
-          set -euo pipefail
-
-          aws ecs describe-task-definition \
-            --task-definition "$CURRENT_TASK_DEF_ARN" \
-            --region "$AWS_REGION" \
-            --query 'taskDefinition' \
-            > server-taskdef.json
-
-          jq --arg IMAGE "$SERVER_IMAGE" '
-            del(
-              .taskDefinitionArn,
-              .revision,
-              .status,
-              .requiresAttributes,
-              .compatibilities,
-              .registeredAt,
-              .registeredBy
-            )
-            | .containerDefinitions =
-              (.containerDefinitions | map(if .name == "server" then .image = $IMAGE else . end))
-          ' server-taskdef.json > server-taskdef-rendered.json
-
-          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --region "$AWS_REGION" \
-            --cli-input-json file://server-taskdef-rendered.json \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-
-          echo "task_def_arn=$NEW_TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
-
-      - name: Register client task definition revision
-        id: client-taskdef
-        env:
-          CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
-          CLIENT_SERVICE: ${{ steps.infra_out.outputs.client_service }}
-          CURRENT_TASK_DEF_ARN: ${{ steps.ecr_repos.outputs.client_task_def }}
-          CLIENT_IMAGE: ${{ steps.push-client.outputs.image_uri }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          set -euo pipefail
-
-          aws ecs describe-task-definition \
-            --task-definition "$CURRENT_TASK_DEF_ARN" \
-            --region "$AWS_REGION" \
-            --query 'taskDefinition' \
-            > client-taskdef.json
-
-          jq --arg IMAGE "$CLIENT_IMAGE" '
-            del(
-              .taskDefinitionArn,
-              .revision,
-              .status,
-              .requiresAttributes,
-              .compatibilities,
-              .registeredAt,
-              .registeredBy
-            )
-            | .containerDefinitions =
-              (.containerDefinitions | map(if .name == "client" then .image = $IMAGE else . end))
-          ' client-taskdef.json > client-taskdef-rendered.json
-
-          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --region "$AWS_REGION" \
-            --cli-input-json file://client-taskdef-rendered.json \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-
-          echo "task_def_arn=$NEW_TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy to ECS Fargate
-        env:
-          CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
-          SERVER_SERVICE: ${{ steps.infra_out.outputs.server_service }}
-          CLIENT_SERVICE: ${{ steps.infra_out.outputs.client_service }}
-          SERVER_TASK_DEF_ARN: ${{ steps.server-taskdef.outputs.task_def_arn }}
-          CLIENT_TASK_DEF_ARN: ${{ steps.client-taskdef.outputs.task_def_arn }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          set -euo pipefail
-
-          aws ecs update-service \
-            --cluster "$CLUSTER" \
-            --service "$SERVER_SERVICE" \
-            --task-definition "$SERVER_TASK_DEF_ARN" \
-            --force-new-deployment \
-            --region "$AWS_REGION"
-
-          aws ecs update-service \
-            --cluster "$CLUSTER" \
-            --service "$CLIENT_SERVICE" \
-            --task-definition "$CLIENT_TASK_DEF_ARN" \
-            --force-new-deployment \
-            --region "$AWS_REGION"
-
-          for attempt in $(seq 1 30); do
-            SERVER_STATUS=$(aws ecs describe-services \
-              --cluster "$CLUSTER" \
-              --services "$SERVER_SERVICE" \
-              --region "$AWS_REGION" \
-              --query 'services[0].[runningCount,desiredCount,pendingCount,length(deployments),deployments[?status==`PRIMARY`]|[0].rolloutState]' \
-              --output text)
-            CLIENT_STATUS=$(aws ecs describe-services \
-              --cluster "$CLUSTER" \
-              --services "$CLIENT_SERVICE" \
-              --region "$AWS_REGION" \
-              --query 'services[0].[runningCount,desiredCount,pendingCount,length(deployments),deployments[?status==`PRIMARY`]|[0].rolloutState]' \
-              --output text)
-
-            SERVER_RUNNING=$(echo "$SERVER_STATUS" | awk '{print $1}')
-            SERVER_DESIRED=$(echo "$SERVER_STATUS" | awk '{print $2}')
-            SERVER_PENDING=$(echo "$SERVER_STATUS" | awk '{print $3}')
-            SERVER_DEPLOYMENTS=$(echo "$SERVER_STATUS" | awk '{print $4}')
-            SERVER_ROLLOUT=$(echo "$SERVER_STATUS" | awk '{print $5}')
-            CLIENT_RUNNING=$(echo "$CLIENT_STATUS" | awk '{print $1}')
-            CLIENT_DESIRED=$(echo "$CLIENT_STATUS" | awk '{print $2}')
-            CLIENT_PENDING=$(echo "$CLIENT_STATUS" | awk '{print $3}')
-            CLIENT_DEPLOYMENTS=$(echo "$CLIENT_STATUS" | awk '{print $4}')
-            CLIENT_ROLLOUT=$(echo "$CLIENT_STATUS" | awk '{print $5}')
-
-            echo "Attempt $attempt/30"
-            echo "Server running/desired/pending/deployments/rollout: $SERVER_RUNNING/$SERVER_DESIRED/$SERVER_PENDING/$SERVER_DEPLOYMENTS/$SERVER_ROLLOUT"
-            echo "Client running/desired/pending/deployments/rollout: $CLIENT_RUNNING/$CLIENT_DESIRED/$CLIENT_PENDING/$CLIENT_DEPLOYMENTS/$CLIENT_ROLLOUT"
-
-            if [ "${SERVER_RUNNING:-0}" -ge 1 ] && [ "$SERVER_RUNNING" = "$SERVER_DESIRED" ] && \
-               [ "${CLIENT_RUNNING:-0}" -ge 1 ] && [ "$CLIENT_RUNNING" = "$CLIENT_DESIRED" ] && \
-               [ "${SERVER_PENDING:-0}" = "0" ] && [ "${CLIENT_PENDING:-0}" = "0" ] && \
-               [ "${SERVER_DEPLOYMENTS:-0}" = "1" ] && [ "${CLIENT_DEPLOYMENTS:-0}" = "1" ] && \
-               [ "${SERVER_ROLLOUT:-IN_PROGRESS}" = "COMPLETED" ] && [ "${CLIENT_ROLLOUT:-IN_PROGRESS}" = "COMPLETED" ]; then
-              echo "Both ECS services have reached steady running counts."
-              exit 0
-            fi
-
-            sleep 20
-          done
-
-          echo "ECS services did not stabilize within 10 minutes."
-          exit 1
-
-      - name: Smoke test - health check
-        env:
-          CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
-          SERVER_SERVICE: ${{ steps.infra_out.outputs.server_service }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          set -euo pipefail
-
-          TASK_ARN=$(aws ecs list-tasks \
-            --cluster "$CLUSTER" \
-            --service-name "$SERVER_SERVICE" \
-            --desired-status RUNNING \
-            --query 'taskArns[0]' \
-            --output text \
-            --region "$AWS_REGION")
-
-          if [ -z "$TASK_ARN" ] || [ "$TASK_ARN" = "None" ]; then
-            echo "No running ECS task found for smoke test."
-            exit 1
-          fi
-
-          ENI=$(aws ecs describe-tasks \
-            --cluster "$CLUSTER" \
-            --tasks "$TASK_ARN" \
-            --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' \
-            --output text \
-            --region "$AWS_REGION")
-
-          PUBLIC_IP=$(aws ec2 describe-network-interfaces \
-            --network-interface-ids "$ENI" \
-            --query 'NetworkInterfaces[0].Association.PublicIp' \
-            --output text \
-            --region "$AWS_REGION")
-
-          echo "Server public IP: $PUBLIC_IP"
-
-          for attempt in $(seq 1 20); do
-            RESPONSE_FILE=$(mktemp)
-            STATUS=$(curl -sS --max-time 15 -o "$RESPONSE_FILE" -w "%{http_code}" "http://$PUBLIC_IP:5001/api/health" || echo "000")
-
+          TASK_ARN=$(aws ecs list-tasks --cluster $CLUSTER --service-name $SERVICE --query 'taskArns[0]' --output text --region ${{ secrets.AWS_REGION }})
+          ENI=$(aws ecs describe-tasks --cluster $CLUSTER --tasks $TASK_ARN --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' --output text --region ${{ secrets.AWS_REGION }})
+          IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI --query 'NetworkInterfaces[0].Association.PublicIp' --output text --region ${{ secrets.AWS_REGION }})
+          echo "Public IP: $IP"
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$IP:8080/health || echo "000")
             if [ "$STATUS" = "200" ]; then
-              echo "Health check passed on attempt $attempt."
-              cat "$RESPONSE_FILE"
-              rm -f "$RESPONSE_FILE"
+              echo "Health check passed!"
               exit 0
             fi
-
-            echo "Attempt $attempt/20 failed with HTTP $STATUS"
-            echo "Response body:"
-            cat "$RESPONSE_FILE" || true
-            rm -f "$RESPONSE_FILE"
-            sleep 15
+            echo "Attempt $i: got $STATUS, retrying..."
+            sleep 10
           done
-
-          echo "Smoke test failed after 20 attempts."
           exit 1
-
-      - name: Deployment diagnostics
-        if: failure()
-        env:
-          CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
-          SERVER_SERVICE: ${{ steps.infra_out.outputs.server_service }}
-          CLIENT_SERVICE: ${{ steps.infra_out.outputs.client_service }}
-          LOG_GROUP: ${{ steps.infra_out.outputs.server_log_group }}
-          SERVER_CONTAINER: ${{ steps.infra_out.outputs.server_container_name }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          set +e
-
-          inspect_service() {
-            local service_name="$1"
-
-            echo "=== STOPPED TASK ARNS FOR $service_name ==="
-            STOPPED_TASKS=$(aws ecs list-tasks \
-              --cluster "$CLUSTER" \
-              --service-name "$service_name" \
-              --desired-status STOPPED \
-              --region "$AWS_REGION" \
-              --query 'taskArns' \
-              --output text)
-
-            if [ -n "$STOPPED_TASKS" ] && [ "$STOPPED_TASKS" != "None" ]; then
-              echo "$STOPPED_TASKS"
-              echo "=== STOPPED TASK DETAILS FOR $service_name ==="
-              aws ecs describe-tasks \
-                --cluster "$CLUSTER" \
-                --tasks $STOPPED_TASKS \
-                --region "$AWS_REGION" \
-                --query 'tasks[*].{taskArn:taskArn,lastStatus:lastStatus,stopCode:stopCode,stoppedReason:stoppedReason,containers:containers[*].{name:name,reason:reason,exitCode:exitCode,lastStatus:lastStatus}}'
-            else
-              echo "No stopped tasks found for $service_name."
-            fi
-          }
-
-          echo "=== ECS SERVICE STATUS ==="
-          aws ecs describe-services \
-            --cluster "$CLUSTER" \
-            --services "$SERVER_SERVICE" "$CLIENT_SERVICE" \
-            --region "$AWS_REGION"
-
-          inspect_service "$SERVER_SERVICE"
-          inspect_service "$CLIENT_SERVICE"
-
-          STREAM_PREFIX="server/$SERVER_CONTAINER/"
-          LOG_STREAM=$(aws logs describe-log-streams \
-            --log-group-name "$LOG_GROUP" \
-            --log-stream-name-prefix "$STREAM_PREFIX" \
-            --order-by LastEventTime \
-            --descending \
-            --max-items 1 \
-            --region "$AWS_REGION" \
-            --query 'logStreams[0].logStreamName' \
-            --output text)
-
-          if [ -n "$LOG_STREAM" ] && [ "$LOG_STREAM" != "None" ]; then
-            echo "=== RECENT CLOUDWATCH LOGS ($LOG_STREAM) ==="
-            aws logs get-log-events \
-              --log-group-name "$LOG_GROUP" \
-              --log-stream-name "$LOG_STREAM" \
-              --limit 50 \
-              --region "$AWS_REGION"
-          else
-            echo "No CloudWatch log stream found for prefix $STREAM_PREFIX"
-          fi
