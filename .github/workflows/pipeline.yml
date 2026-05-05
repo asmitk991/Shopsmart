@@ -45,6 +45,9 @@ jobs:
     name: Terraform Apply
     runs-on: ubuntu-latest
     needs: tests
+    outputs:
+      server_ecr: ${{ steps.out.outputs.server_ecr }}
+      client_ecr: ${{ steps.out.outputs.client_ecr }}
     defaults:
       run:
         working-directory: infra
@@ -76,6 +79,12 @@ jobs:
       - name: Terraform Apply
         run: terraform apply -auto-approve tfplan
 
+      - name: Export outputs
+        id: out
+        run: |
+          echo "server_ecr=$(terraform output -raw ecr_server_url)" >> $GITHUB_OUTPUT
+          echo "client_ecr=$(terraform output -raw ecr_client_url)" >> $GITHUB_OUTPUT
+
   build_and_push:
     name: Build & Push Docker Images
     runs-on: ubuntu-latest
@@ -101,24 +110,22 @@ jobs:
       - name: Build & push server image
         id: meta-server
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ needs.terraform_apply.outputs.server_ecr }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          IMAGE=$ECR_REGISTRY/shopsmart-server:$IMAGE_TAG
-          docker build -t $IMAGE ./server
-          docker push $IMAGE
-          echo "tags=$IMAGE" >> $GITHUB_OUTPUT
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG ./server
+          docker push $ECR_REPOSITORY:$IMAGE_TAG
+          echo "tags=$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
       - name: Build & push client image
         id: meta-client
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ needs.terraform_apply.outputs.client_ecr }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          IMAGE=$ECR_REGISTRY/shopsmart-client:$IMAGE_TAG
-          docker build -t $IMAGE ./client
-          docker push $IMAGE
-          echo "tags=$IMAGE" >> $GITHUB_OUTPUT
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG ./client
+          docker push $ECR_REPOSITORY:$IMAGE_TAG
+          echo "tags=$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
   deploy_to_ecs:
     name: Deploy to ECS Fargate

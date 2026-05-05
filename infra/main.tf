@@ -37,7 +37,7 @@ resource "aws_s3_bucket_public_access_block" "main" {
 }
 
 resource "aws_ecr_repository" "server" {
-  name                 = "${var.project_name}-server"
+  name                 = "${var.project_name}-server-${random_id.suffix.hex}"
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
@@ -46,7 +46,7 @@ resource "aws_ecr_repository" "server" {
 }
 
 resource "aws_ecr_repository" "client" {
-  name                 = "${var.project_name}-client"
+  name                 = "${var.project_name}-client-${random_id.suffix.hex}"
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
@@ -59,7 +59,7 @@ resource "aws_ecs_cluster" "main" {
 }
 
 resource "aws_cloudwatch_log_group" "ecs" {
-  name              = "/ecs/${var.project_name}"
+  name              = "/ecs/${var.project_name}-${random_id.suffix.hex}"
   retention_in_days = 7
 }
 
@@ -145,7 +145,7 @@ data "aws_subnets" "default" {
 }
 
 resource "aws_security_group" "ecs" {
-  name        = "${var.project_name}-ecs-sg"
+  name        = "${var.project_name}-ecs-sg-${random_id.suffix.hex}"
   description = "Allow inbound traffic to ECS tasks"
   vpc_id      = data.aws_vpc.default.id
 
@@ -210,7 +210,7 @@ resource "aws_ecs_service" "client" {
 # --- Standalone EC2 for Rubric 9 (Manual Deploy) ---
 
 resource "aws_security_group" "ec2" {
-  name        = "${var.project_name}-ec2-sg"
+  name        = "${var.project_name}-ec2-sg-${random_id.suffix.hex}"
   description = "Allow SSH and App traffic to EC2"
   vpc_id      = data.aws_vpc.default.id
 
