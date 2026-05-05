@@ -73,6 +73,7 @@ jobs:
           terraform import aws_ecr_repository.client "${{ env.PROJECT_NAME }}-client" || true
           terraform import aws_ecs_cluster.main "${{ env.PROJECT_NAME }}-cluster" || true
           terraform import aws_cloudwatch_log_group.ecs "/ecs/${{ env.PROJECT_NAME }}" || true
+          terraform import aws_ecs_service.app "${{ env.PROJECT_NAME }}-cluster/${{ env.PROJECT_NAME }}-service" || true
           terraform apply -auto-approve
 
       # --- Phase 3: Build & Push (Rubric 3 - Order: Terraform -> Build) ---
