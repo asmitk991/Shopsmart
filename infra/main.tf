@@ -93,11 +93,11 @@ resource "aws_ecs_task_definition" "server" {
       }
     }
     healthCheck = {
-      command     = ["CMD-SHELL", "wget -qO- http://localhost:5001/api/health || exit 1"]
+      command     = ["CMD-SHELL", "curl -f http://localhost:5001/api/health || exit 1"]
       interval    = 30
       timeout     = 10
       retries     = 3
-      startPeriod = 60
+      startPeriod = 90
     }
   }])
 }
@@ -124,11 +124,11 @@ resource "aws_ecs_task_definition" "client" {
       }
     }
     healthCheck = {
-      command     = ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      command     = ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
       interval    = 30
       timeout     = 10
       retries     = 3
-      startPeriod = 30
+      startPeriod = 60
     }
   }])
 }

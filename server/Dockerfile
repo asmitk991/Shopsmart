@@ -18,10 +18,13 @@ COPY . .
 
 RUN mkdir -p /app/data && chown -R appuser:appgroup /app
 USER appuser
+USER root
+RUN apk add --no-cache curl
+USER appuser
 
 EXPOSE 5001
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-  CMD wget -qO- http://localhost:5001/api/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+  CMD curl -f http://localhost:5001/api/health || exit 1
 
 CMD ["sh", "-c", "npm run prisma:migrate && node src/index.js"]
