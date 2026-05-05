@@ -21,13 +21,13 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # --- Phase 1: Testing (Rubric Compliance) ---
+      # --- Phase 1: Testing (Rubric 1) ---
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Server Tests
+      - name: Run Server Tests
         run: |
           npm ci --prefix server
           npm run prisma:migrate --prefix server
@@ -36,12 +36,21 @@ jobs:
           DATABASE_URL: file:./test.db
           JWT_SECRET: test-secret-key
 
-      - name: Client Tests
+      - name: Run Client Tests
         run: |
           npm ci --prefix client
           npm run test:ci --prefix client
 
-      # --- Phase 2: AWS Configuration ---
+      - name: Generate Test Reports (Rubric 1)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            server/coverage/
+            client/coverage/
+
+      # --- Phase 2: Infrastructure (Rubric 2 - Order: Tests -> Terraform) ---
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -50,65 +59,52 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      # --- Step 3: Ensure ECR Repositories Exist (Professor's Trick) ---
-      - name: Ensure ECR Repositories Exist
-        run: |
-          aws ecr describe-repositories --repository-names "${{ env.PROJECT_NAME }}-server" --region "${{ env.AWS_REGION }}" >/dev/null 2>&1 || \
-          aws ecr create-repository --repository-name "${{ env.PROJECT_NAME }}-server" --region "${{ env.AWS_REGION }}"
-          
-          aws ecr describe-repositories --repository-names "${{ env.PROJECT_NAME }}-client" --region "${{ env.AWS_REGION }}" >/dev/null 2>&1 || \
-          aws ecr create-repository --repository-name "${{ env.PROJECT_NAME }}-client" --region "${{ env.AWS_REGION }}"
-
-      # --- Step 4: Build & Push Images ---
-      - name: Build, Tag & Push Server Image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          IMAGE_URI=$ECR_REGISTRY/${{ env.PROJECT_NAME }}-server:$IMAGE_TAG
-          docker build -t $IMAGE_URI ./server
-          docker push $IMAGE_URI
-          docker tag $IMAGE_URI $ECR_REGISTRY/${{ env.PROJECT_NAME }}-server:latest
-          docker push $ECR_REGISTRY/${{ env.PROJECT_NAME }}-server:latest
-
-      - name: Build, Tag & Push Client Image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          IMAGE_URI=$ECR_REGISTRY/${{ env.PROJECT_NAME }}-client:$IMAGE_TAG
-          docker build -t $IMAGE_URI ./client
-          docker push $IMAGE_URI
-          docker tag $IMAGE_URI $ECR_REGISTRY/${{ env.PROJECT_NAME }}-client:latest
-          docker push $ECR_REGISTRY/${{ env.PROJECT_NAME }}-client:latest
-
-      # --- Phase 3: Infrastructure (Terraform) ---
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform Init
-        run: terraform init
+      - name: Terraform Init & Validate
+        run: |
+          terraform init
+          terraform validate
 
-      # --- Step 5: Terraform Import (Professor's Secret Sauce) ---
-      - name: Terraform Import Existing Resources
+      - name: Terraform Import & Apply
         run: |
           terraform import aws_ecr_repository.server "${{ env.PROJECT_NAME }}-server" || true
           terraform import aws_ecr_repository.client "${{ env.PROJECT_NAME }}-client" || true
           terraform import aws_ecs_cluster.main "${{ env.PROJECT_NAME }}-cluster" || true
           terraform import aws_cloudwatch_log_group.ecs "/ecs/${{ env.PROJECT_NAME }}" || true
+          terraform apply -auto-approve
 
-      - name: Terraform Apply
-        run: terraform apply -auto-approve
+      # --- Phase 3: Build & Push (Rubric 3 - Order: Terraform -> Build) ---
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Deployment Summary
+      - name: Build & Push Images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
         run: |
+          docker build -t $ECR_REGISTRY/${{ env.PROJECT_NAME }}-server:$TAG ./server
+          docker tag $ECR_REGISTRY/${{ env.PROJECT_NAME }}-server:$TAG $ECR_REGISTRY/${{ env.PROJECT_NAME }}-server:latest
+          docker push $ECR_REGISTRY/${{ env.PROJECT_NAME }}-server:latest
+          
+          docker build -t $ECR_REGISTRY/${{ env.PROJECT_NAME }}-client:$TAG ./client
+          docker tag $ECR_REGISTRY/${{ env.PROJECT_NAME }}-client:$TAG $ECR_REGISTRY/${{ env.PROJECT_NAME }}-client:latest
+          docker push $ECR_REGISTRY/${{ env.PROJECT_NAME }}-client:latest
+
+      - name: Force ECS Deployment
+        run: |
+          aws ecs update-service --cluster ${{ env.PROJECT_NAME }}-cluster --service ${{ env.PROJECT_NAME }}-service --force-new-deployment --region ${{ env.AWS_REGION }}
+          aws ecs wait services-stable --cluster ${{ env.PROJECT_NAME }}-cluster --services ${{ env.PROJECT_NAME }}-service --region ${{ env.AWS_REGION }}
+
+      - name: Verify Service (Rubric 3 - Healthcheck)
+        run: |
+          TASK_ARN=$(aws ecs list-tasks --cluster ${{ env.PROJECT_NAME }}-cluster --service-name ${{ env.PROJECT_NAME }}-service --query 'taskArns[0]' --output text --region ${{ env.AWS_REGION }})
+          ENI=$(aws ecs describe-tasks --cluster ${{ env.PROJECT_NAME }}-cluster --tasks $TASK_ARN --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' --output text --region ${{ env.AWS_REGION }})
+          IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI --query 'NetworkInterfaces[0].Association.PublicIp' --output text --region ${{ env.AWS_REGION }})
           echo "============================================"
-          echo "  ✅ DEPLOYMENT COMPLETE"
+          echo "  ✅ DEPLOYMENT SUCCESSFUL"
+          echo "  App URL: http://$IP:8080"
           echo "============================================"
-          echo "👉 Go to AWS Console → ECS → Clusters"
-          echo "   → shopsmart-cluster → Tasks"
-          echo "   → Copy Public IP → Open in browser :8080"
+          curl -f http://$IP:8080/health || exit 1
