@@ -82,7 +82,7 @@ resource "aws_ecs_task_definition" "server" {
     portMappings = [{ containerPort = 5001, protocol = "tcp" }]
     environment = [
       { name = "NODE_ENV", value = "production" },
-      { name = "DATABASE_URL", value = "file:/tmp/prod.db" }
+      { name = "DATABASE_URL", value = "file:/app/data/prod.db" }
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -97,7 +97,7 @@ resource "aws_ecs_task_definition" "server" {
       interval    = 30
       timeout     = 10
       retries     = 3
-      startPeriod = 15
+      startPeriod = 60
     }
   }])
 }
@@ -128,7 +128,7 @@ resource "aws_ecs_task_definition" "client" {
       interval    = 30
       timeout     = 10
       retries     = 3
-      startPeriod = 10
+      startPeriod = 30
     }
   }])
 }
