@@ -84,8 +84,6 @@ jobs:
         id: infra_out
         working-directory: infra
         run: |
-          echo "server_ecr=$(terraform output -raw ecr_server_url)" >> "$GITHUB_OUTPUT"
-          echo "client_ecr=$(terraform output -raw ecr_client_url)" >> "$GITHUB_OUTPUT"
           echo "cluster_name=$(terraform output -raw ecs_cluster_name)" >> "$GITHUB_OUTPUT"
           echo "server_service=$(terraform output -raw ecs_server_service_name)" >> "$GITHUB_OUTPUT"
           echo "client_service=$(terraform output -raw ecs_client_service_name)" >> "$GITHUB_OUTPUT"
@@ -96,10 +94,51 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Resolve active ECR repositories from ECS services
+        id: ecr_repos
+        env:
+          CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
+          SERVER_SERVICE: ${{ steps.infra_out.outputs.server_service }}
+          CLIENT_SERVICE: ${{ steps.infra_out.outputs.client_service }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          set -euo pipefail
+
+          SERVER_TASK_DEF_ARN=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVER_SERVICE" \
+            --region "$AWS_REGION" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          CLIENT_TASK_DEF_ARN=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$CLIENT_SERVICE" \
+            --region "$AWS_REGION" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          SERVER_IMAGE=$(aws ecs describe-task-definition \
+            --task-definition "$SERVER_TASK_DEF_ARN" \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition.containerDefinitions[?name==`server`].image | [0]' \
+            --output text)
+
+          CLIENT_IMAGE=$(aws ecs describe-task-definition \
+            --task-definition "$CLIENT_TASK_DEF_ARN" \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition.containerDefinitions[?name==`client`].image | [0]' \
+            --output text)
+
+          echo "server_repo=${SERVER_IMAGE%:*}" >> "$GITHUB_OUTPUT"
+          echo "client_repo=${CLIENT_IMAGE%:*}" >> "$GITHUB_OUTPUT"
+          echo "server_task_def=$SERVER_TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
+          echo "client_task_def=$CLIENT_TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
+
       - name: Build & push server image
         id: push-server
         env:
-          ECR_REPO: ${{ steps.infra_out.outputs.server_ecr }}
+          ECR_REPO: ${{ steps.ecr_repos.outputs.server_repo }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build -t "$ECR_REPO:$IMAGE_TAG" ./server
@@ -109,7 +148,7 @@ jobs:
       - name: Build & push client image
         id: push-client
         env:
-          ECR_REPO: ${{ steps.infra_out.outputs.client_ecr }}
+          ECR_REPO: ${{ steps.ecr_repos.outputs.client_repo }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build -t "$ECR_REPO:$IMAGE_TAG" ./client
@@ -122,17 +161,11 @@ jobs:
         env:
           CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
           SERVER_SERVICE: ${{ steps.infra_out.outputs.server_service }}
+          CURRENT_TASK_DEF_ARN: ${{ steps.ecr_repos.outputs.server_task_def }}
           SERVER_IMAGE: ${{ steps.push-server.outputs.image_uri }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
-
-          CURRENT_TASK_DEF_ARN=$(aws ecs describe-services \
-            --cluster "$CLUSTER" \
-            --services "$SERVER_SERVICE" \
-            --region "$AWS_REGION" \
-            --query 'services[0].taskDefinition' \
-            --output text)
 
           aws ecs describe-task-definition \
             --task-definition "$CURRENT_TASK_DEF_ARN" \
@@ -167,17 +200,11 @@ jobs:
         env:
           CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
           CLIENT_SERVICE: ${{ steps.infra_out.outputs.client_service }}
+          CURRENT_TASK_DEF_ARN: ${{ steps.ecr_repos.outputs.client_task_def }}
           CLIENT_IMAGE: ${{ steps.push-client.outputs.image_uri }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
-
-          CURRENT_TASK_DEF_ARN=$(aws ecs describe-services \
-            --cluster "$CLUSTER" \
-            --services "$CLIENT_SERVICE" \
-            --region "$AWS_REGION" \
-            --query 'services[0].taskDefinition' \
-            --output text)
 
           aws ecs describe-task-definition \
             --task-definition "$CURRENT_TASK_DEF_ARN" \
