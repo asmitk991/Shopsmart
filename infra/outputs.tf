@@ -22,6 +22,14 @@ output "ecs_client_service_name" {
   value = aws_ecs_service.client.name
 }
 
+output "ecs_log_group_name" {
+  value = aws_cloudwatch_log_group.ecs.name
+}
+
+output "ecs_server_container_name" {
+  value = "server"
+}
+
 output "manual_deploy_ip" {
   value = aws_instance.manual_deploy.public_ip
 }

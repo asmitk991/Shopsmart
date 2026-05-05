@@ -67,6 +67,13 @@ data "aws_iam_role" "lab_role" {
   name = "LabRole"
 }
 
+data "aws_internet_gateway" "default" {
+  filter {
+    name   = "attachment.vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
+
 resource "aws_ecs_task_definition" "server" {
   family                   = "${var.project_name}-server"
   network_mode             = "awsvpc"
@@ -82,7 +89,9 @@ resource "aws_ecs_task_definition" "server" {
     portMappings = [{ containerPort = 5001, protocol = "tcp" }]
     environment = [
       { name = "NODE_ENV", value = "production" },
-      { name = "DATABASE_URL", value = "file:/app/data/prod.db" }
+      { name = "PORT", value = "5001" },
+      { name = "DATABASE_URL", value = "file:/app/data/prod.db" },
+      { name = "JWT_SECRET", value = var.jwt_secret }
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -177,6 +186,9 @@ resource "aws_ecs_service" "server" {
   task_definition = aws_ecs_task_definition.server.arn
   desired_count   = 1
   launch_type     = "FARGATE"
+  health_check_grace_period_seconds = 60
+
+  depends_on = [aws_cloudwatch_log_group.ecs]
 
   network_configuration {
     subnets          = data.aws_subnets.default.ids
@@ -195,6 +207,9 @@ resource "aws_ecs_service" "client" {
   task_definition = aws_ecs_task_definition.client.arn
   desired_count   = 1
   launch_type     = "FARGATE"
+  health_check_grace_period_seconds = 60
+
+  depends_on = [aws_cloudwatch_log_group.ecs]
 
   network_configuration {
     subnets          = data.aws_subnets.default.ids
