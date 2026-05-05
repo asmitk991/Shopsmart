@@ -48,6 +48,9 @@ jobs:
     outputs:
       server_ecr: ${{ steps.out.outputs.server_ecr }}
       client_ecr: ${{ steps.out.outputs.client_ecr }}
+      server_service: ${{ steps.out.outputs.server_service }}
+      client_service: ${{ steps.out.outputs.client_service }}
+      cluster_name: ${{ steps.out.outputs.cluster_name }}
     defaults:
       run:
         working-directory: infra
@@ -84,6 +87,9 @@ jobs:
         run: |
           echo "server_ecr=$(terraform output -raw ecr_server_url)" >> $GITHUB_OUTPUT
           echo "client_ecr=$(terraform output -raw ecr_client_url)" >> $GITHUB_OUTPUT
+          echo "server_service=$(terraform output -raw ecs_server_service_name)" >> $GITHUB_OUTPUT
+          echo "client_service=$(terraform output -raw ecs_client_service_name)" >> $GITHUB_OUTPUT
+          echo "cluster_name=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_OUTPUT
 
   build_and_push:
     name: Build & Push Docker Images
@@ -143,16 +149,16 @@ jobs:
       - name: Force new deployment - server
         run: |
           aws ecs update-service \
-            --cluster shopsmart-cluster \
-            --service shopsmart-server \
+            --cluster ${{ needs.terraform_apply.outputs.cluster_name }} \
+            --service ${{ needs.terraform_apply.outputs.server_service }} \
             --force-new-deployment \
             --region ${{ secrets.AWS_REGION }}
 
       - name: Force new deployment - client
         run: |
           aws ecs update-service \
-            --cluster shopsmart-cluster \
-            --service shopsmart-client \
+            --cluster ${{ needs.terraform_apply.outputs.cluster_name }} \
+            --service ${{ needs.terraform_apply.outputs.client_service }} \
             --force-new-deployment \
             --region ${{ secrets.AWS_REGION }}
 

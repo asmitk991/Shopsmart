@@ -55,7 +55,7 @@ resource "aws_ecr_repository" "client" {
 }
 
 resource "aws_ecs_cluster" "main" {
-  name = "${var.project_name}-cluster"
+  name = "${var.project_name}-cluster-${random_id.suffix.hex}"
 }
 
 resource "aws_cloudwatch_log_group" "ecs" {
@@ -172,7 +172,7 @@ resource "aws_security_group" "ecs" {
 }
 
 resource "aws_ecs_service" "server" {
-  name            = "${var.project_name}-server"
+  name            = "${var.project_name}-server-${random_id.suffix.hex}"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.server.arn
   desired_count   = 1
@@ -190,7 +190,7 @@ resource "aws_ecs_service" "server" {
 }
 
 resource "aws_ecs_service" "client" {
-  name            = "${var.project_name}-client"
+  name            = "${var.project_name}-client-${random_id.suffix.hex}"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.client.arn
   desired_count   = 1

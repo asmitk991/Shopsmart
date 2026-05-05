@@ -14,6 +14,14 @@ output "ecs_cluster_name" {
   value = aws_ecs_cluster.main.name
 }
 
+output "ecs_server_service_name" {
+  value = aws_ecs_service.server.name
+}
+
+output "ecs_client_service_name" {
+  value = aws_ecs_service.client.name
+}
+
 output "manual_deploy_ip" {
   value = aws_instance.manual_deploy.public_ip
 }
