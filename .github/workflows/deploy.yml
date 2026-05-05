@@ -94,10 +94,12 @@ jobs:
         run: terraform init
 
       # --- Step 5: Terraform Import (Professor's Secret Sauce) ---
-      - name: Terraform Import Existing ECRs
+      - name: Terraform Import Existing Resources
         run: |
           terraform import aws_ecr_repository.server "${{ env.PROJECT_NAME }}-server" || true
           terraform import aws_ecr_repository.client "${{ env.PROJECT_NAME }}-client" || true
+          terraform import aws_ecs_cluster.main "${{ env.PROJECT_NAME }}-cluster" || true
+          terraform import aws_cloudwatch_log_group.ecs "/ecs/${{ env.PROJECT_NAME }}" || true
 
       - name: Terraform Apply
         run: terraform apply -auto-approve
