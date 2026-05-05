@@ -1,3 +1,10 @@
+provider "aws" {
+  region = var.aws_region
+}
+
+# Auto-fetch Account ID like the professor's template
+data "aws_caller_identity" "current" {}
+
 resource "random_id" "suffix" {
   byte_length = 4
 }
@@ -39,6 +46,7 @@ resource "aws_s3_bucket_public_access_block" "main" {
 resource "aws_ecr_repository" "server" {
   name                 = "${var.project_name}-server-${random_id.suffix.hex}"
   image_tag_mutability = "MUTABLE"
+  force_delete         = true # Professor's recommendation
 
   image_scanning_configuration {
     scan_on_push = true
@@ -48,6 +56,7 @@ resource "aws_ecr_repository" "server" {
 resource "aws_ecr_repository" "client" {
   name                 = "${var.project_name}-client-${random_id.suffix.hex}"
   image_tag_mutability = "MUTABLE"
+  force_delete         = true # Professor's recommendation
 
   image_scanning_configuration {
     scan_on_push = true
@@ -80,8 +89,8 @@ resource "aws_ecs_task_definition" "server" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = "256"
   memory                   = "512"
-  execution_role_arn       = data.aws_iam_role.lab_role.arn
-  task_role_arn            = data.aws_iam_role.lab_role.arn
+  execution_role_arn       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole"
+  task_role_arn            = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole"
 
   container_definitions = jsonencode([{
     name  = "server"
@@ -117,8 +126,8 @@ resource "aws_ecs_task_definition" "client" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = "256"
   memory                   = "512"
-  execution_role_arn       = data.aws_iam_role.lab_role.arn
-  task_role_arn            = data.aws_iam_role.lab_role.arn
+  execution_role_arn       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole"
+  task_role_arn            = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole"
 
   container_definitions = jsonencode([{
     name  = "client"
@@ -187,6 +196,7 @@ resource "aws_ecs_service" "server" {
   desired_count   = 1
   launch_type     = "FARGATE"
   health_check_grace_period_seconds = 60
+  force_new_deployment = true
 
   depends_on = [aws_cloudwatch_log_group.ecs]
 
@@ -208,6 +218,7 @@ resource "aws_ecs_service" "client" {
   desired_count   = 1
   launch_type     = "FARGATE"
   health_check_grace_period_seconds = 60
+  force_new_deployment = true
 
   depends_on = [aws_cloudwatch_log_group.ecs]
 
@@ -220,64 +231,4 @@ resource "aws_ecs_service" "client" {
   lifecycle {
     ignore_changes = [task_definition]
   }
-}
-
-# --- Standalone EC2 for Rubric 9 (Manual Deploy) ---
-
-resource "aws_security_group" "ec2" {
-  name        = "${var.project_name}-ec2-sg-${random_id.suffix.hex}"
-  description = "Allow SSH and App traffic to EC2"
-  vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 5001
-    to_port     = 5001
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-data "aws_ami" "ubuntu" {
-  most_recent = true
-  owners      = ["099720109477"] # Canonical
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
-  }
-}
-
-resource "aws_instance" "manual_deploy" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t2.micro"
-  key_name               = "shopsmart-key"
-  vpc_security_group_ids = [aws_security_group.ec2.id]
-
-  tags = {
-    Name    = "${var.project_name}-manual-deploy"
-    Project = var.project_name
-  }
-
-  user_data = <<-EOF
-              #!/bin/bash
-              apt-get update
-              apt-get install -y nodejs npm
-              npm install -g pm2
-              mkdir -p /home/ubuntu/shopsmart
-              chown ubuntu:ubuntu /home/ubuntu/shopsmart
-              EOF
 }

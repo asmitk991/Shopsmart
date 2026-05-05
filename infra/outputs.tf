@@ -29,7 +29,3 @@ output "ecs_log_group_name" {
 output "ecs_server_container_name" {
   value = "server"
 }
-
-output "manual_deploy_ip" {
-  value = aws_instance.manual_deploy.public_ip
-}
