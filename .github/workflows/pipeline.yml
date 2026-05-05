@@ -41,19 +41,10 @@ jobs:
             client/test-results/
             client/coverage/
 
-  terraform_apply:
-    name: Terraform Apply
+  deploy_all:
+    name: Infra & Build & Deploy
     runs-on: ubuntu-latest
     needs: tests
-    outputs:
-      server_ecr: ${{ steps.out.outputs.server_ecr }}
-      client_ecr: ${{ steps.out.outputs.client_ecr }}
-      server_service: ${{ steps.out.outputs.server_service }}
-      client_service: ${{ steps.out.outputs.client_service }}
-      cluster_name: ${{ steps.out.outputs.cluster_name }}
-    defaults:
-      run:
-        working-directory: infra
     steps:
       - uses: actions/checkout@v4
 
@@ -72,126 +63,61 @@ jobs:
 
       - name: Terraform Init
         run: terraform init
-
-      - name: Terraform Validate
-        run: terraform validate
-
-      - name: Terraform Plan
-        run: terraform plan -var="db_password=${{ secrets.DB_PASSWORD }}" -out=tfplan
+        working-directory: infra
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
+        run: terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
+        working-directory: infra
 
-      - name: Export outputs
-        id: out
+      - name: Get Infrastructure Outputs
+        id: infra_out
         run: |
           echo "server_ecr=$(terraform output -raw ecr_server_url)" >> $GITHUB_OUTPUT
           echo "client_ecr=$(terraform output -raw ecr_client_url)" >> $GITHUB_OUTPUT
+          echo "cluster_name=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_OUTPUT
           echo "server_service=$(terraform output -raw ecs_server_service_name)" >> $GITHUB_OUTPUT
           echo "client_service=$(terraform output -raw ecs_client_service_name)" >> $GITHUB_OUTPUT
-          echo "cluster_name=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_OUTPUT
-
-  build_and_push:
-    name: Build & Push Docker Images
-    runs-on: ubuntu-latest
-    needs: terraform_apply
-    outputs:
-      server_image: ${{ steps.meta-server.outputs.tags }}
-      client_image: ${{ steps.meta-client.outputs.tags }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          echo "ec2_ip=$(terraform output -raw manual_deploy_ip)" >> $GITHUB_OUTPUT
+        working-directory: infra
 
       - name: Login to ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build & push server image
-        id: meta-server
         env:
-          ECR_REPOSITORY: ${{ needs.terraform_apply.outputs.server_ecr }}
+          ECR_REPO: ${{ steps.infra_out.outputs.server_ecr }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REPOSITORY:$IMAGE_TAG ./server
-          docker push $ECR_REPOSITORY:$IMAGE_TAG
-          echo "tags=$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          docker build -t $ECR_REPO:$IMAGE_TAG ./server
+          docker push $ECR_REPO:$IMAGE_TAG
 
       - name: Build & push client image
-        id: meta-client
         env:
-          ECR_REPOSITORY: ${{ needs.terraform_apply.outputs.client_ecr }}
+          ECR_REPO: ${{ steps.infra_out.outputs.client_ecr }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REPOSITORY:$IMAGE_TAG ./client
-          docker push $ECR_REPOSITORY:$IMAGE_TAG
-          echo "tags=$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          docker build -t $ECR_REPO:$IMAGE_TAG ./client
+          docker push $ECR_REPO:$IMAGE_TAG
 
-  deploy_to_ecs:
-    name: Deploy to ECS Fargate
-    runs-on: ubuntu-latest
-    needs: build_and_push
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Force new deployment - server
+      - name: Deploy to ECS Fargate
+        env:
+          CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
+          SERVER_SERVICE: ${{ steps.infra_out.outputs.server_service }}
+          CLIENT_SERVICE: ${{ steps.infra_out.outputs.client_service }}
         run: |
-          aws ecs update-service \
-            --cluster ${{ needs.terraform_apply.outputs.cluster_name }} \
-            --service ${{ needs.terraform_apply.outputs.server_service }} \
-            --force-new-deployment \
-            --region ${{ secrets.AWS_REGION }}
-
-      - name: Force new deployment - client
-        run: |
-          aws ecs update-service \
-            --cluster ${{ needs.terraform_apply.outputs.cluster_name }} \
-            --service ${{ needs.terraform_apply.outputs.client_service }} \
-            --force-new-deployment \
-            --region ${{ secrets.AWS_REGION }}
-
-      - name: Wait for server service stability
-        run: |
-          aws ecs wait services-stable \
-            --cluster shopsmart-cluster \
-            --services shopsmart-server \
-            --region ${{ secrets.AWS_REGION }}
-
-      - name: Wait for client service stability
-        run: |
-          aws ecs wait services-stable \
-            --cluster shopsmart-cluster \
-            --services shopsmart-client \
-            --region ${{ secrets.AWS_REGION }}
+          aws ecs update-service --cluster $CLUSTER --service $SERVER_SERVICE --force-new-deployment --region ${{ secrets.AWS_REGION }}
+          aws ecs update-service --cluster $CLUSTER --service $CLIENT_SERVICE --force-new-deployment --region ${{ secrets.AWS_REGION }}
+          aws ecs wait services-stable --cluster $CLUSTER --services $SERVER_SERVICE $CLIENT_SERVICE --region ${{ secrets.AWS_REGION }}
 
       - name: Smoke test - health check
+        env:
+          CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
+          SERVER_SERVICE: ${{ steps.infra_out.outputs.server_service }}
         run: |
-          TASK_ARN=$(aws ecs list-tasks \
-            --cluster shopsmart-cluster \
-            --service-name shopsmart-server \
-            --query 'taskArns[0]' --output text \
-            --region ${{ secrets.AWS_REGION }})
-          ENI=$(aws ecs describe-tasks \
-            --cluster shopsmart-cluster \
-            --tasks $TASK_ARN \
-            --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' \
-            --output text --region ${{ secrets.AWS_REGION }})
-          PUBLIC_IP=$(aws ec2 describe-network-interfaces \
-            --network-interface-ids $ENI \
-            --query 'NetworkInterfaces[0].Association.PublicIp' \
-            --output text --region ${{ secrets.AWS_REGION }})
+          TASK_ARN=$(aws ecs list-tasks --cluster $CLUSTER --service-name $SERVER_SERVICE --query 'taskArns[0]' --output text --region ${{ secrets.AWS_REGION }})
+          ENI=$(aws ecs describe-tasks --cluster $CLUSTER --tasks $TASK_ARN --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' --output text --region ${{ secrets.AWS_REGION }})
+          PUBLIC_IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI --query 'NetworkInterfaces[0].Association.PublicIp' --output text --region ${{ secrets.AWS_REGION }})
           echo "Server public IP: $PUBLIC_IP"
           for i in {1..10}; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$PUBLIC_IP:5001/api/health || echo "000")
@@ -202,5 +128,4 @@ jobs:
             echo "Attempt $i: got $STATUS, retrying in 10s..."
             sleep 10
           done
-          echo "Health check failed after 10 attempts"
           exit 1
