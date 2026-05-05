@@ -218,3 +218,63 @@ resource "aws_ecs_service" "client" {
     ignore_changes = [task_definition]
   }
 }
+
+# --- Standalone EC2 for Rubric 9 (Manual Deploy) ---
+
+resource "aws_security_group" "ec2" {
+  name        = "${var.project_name}-ec2-sg"
+  description = "Allow SSH and App traffic to EC2"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 5001
+    to_port     = 5001
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+}
+
+resource "aws_instance" "manual_deploy" {
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = "t2.micro"
+  key_name               = "shopsmart-key"
+  vpc_security_group_ids = [aws_security_group.ec2.id]
+
+  tags = {
+    Name    = "${var.project_name}-manual-deploy"
+    Project = var.project_name
+  }
+
+  user_data = <<-EOF
+              #!/bin/bash
+              apt-get update
+              apt-get install -y nodejs npm
+              npm install -g pm2
+              mkdir -p /home/ubuntu/shopsmart
+              chown ubuntu:ubuntu /home/ubuntu/shopsmart
+              EOF
+}

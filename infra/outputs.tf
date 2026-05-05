@@ -13,3 +13,7 @@ output "ecr_client_url" {
 output "ecs_cluster_name" {
   value = aws_ecs_cluster.main.name
 }
+
+output "manual_deploy_ip" {
+  value = aws_instance.manual_deploy.public_ip
+}
