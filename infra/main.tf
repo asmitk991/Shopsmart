@@ -58,7 +58,10 @@ resource "aws_ecr_repository" "client" {
 # --- Networking ---
 data "aws_vpc" "default" { default = true }
 data "aws_subnets" "default" {
-  filter { name = "vpc-id", values = [data.aws_vpc.default.id] }
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
 }
 
 resource "aws_security_group" "ecs" {
@@ -111,10 +114,21 @@ resource "aws_ecs_task_definition" "app" {
     {
       name  = "server"
       image = "${aws_ecr_repository.server.repository_url}:latest"
-      portMappings = [{ containerPort = 5001, protocol = "tcp" }]
+      portMappings = [
+        {
+          containerPort = 5001
+          protocol      = "tcp"
+        }
+      ]
       environment = [
-        { name = "NODE_ENV", value = "production" },
-        { name = "DATABASE_URL", value = "file:/app/data/prod.db" }
+        {
+          name  = "NODE_ENV"
+          value = "production"
+        },
+        {
+          name  = "DATABASE_URL"
+          value = "file:/app/data/prod.db"
+        }
       ]
       logConfiguration = {
         logDriver = "awslogs"
@@ -128,7 +142,12 @@ resource "aws_ecs_task_definition" "app" {
     {
       name  = "client"
       image = "${aws_ecr_repository.client.repository_url}:latest"
-      portMappings = [{ containerPort = 8080, protocol = "tcp" }]
+      portMappings = [
+        {
+          containerPort = 8080
+          protocol      = "tcp"
+        }
+      ]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
