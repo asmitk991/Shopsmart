@@ -89,7 +89,6 @@ jobs:
           echo "client_service=$(terraform output -raw ecs_client_service_name)" >> "$GITHUB_OUTPUT"
           echo "server_log_group=$(terraform output -raw ecs_log_group_name)" >> "$GITHUB_OUTPUT"
           echo "server_container_name=$(terraform output -raw ecs_server_container_name)" >> "$GITHUB_OUTPUT"
-          echo "ec2_ip=$(terraform output -raw manual_deploy_ip)" >> "$GITHUB_OUTPUT"
 
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
