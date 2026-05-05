@@ -97,36 +97,140 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build & push server image
+        id: push-server
         env:
           ECR_REPO: ${{ steps.infra_out.outputs.server_ecr }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build -t "$ECR_REPO:$IMAGE_TAG" ./server
-          docker tag "$ECR_REPO:$IMAGE_TAG" "$ECR_REPO:latest"
           docker push "$ECR_REPO:$IMAGE_TAG"
-          docker push "$ECR_REPO:latest"
+          echo "image_uri=$ECR_REPO:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Build & push client image
+        id: push-client
         env:
           ECR_REPO: ${{ steps.infra_out.outputs.client_ecr }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build -t "$ECR_REPO:$IMAGE_TAG" ./client
-          docker tag "$ECR_REPO:$IMAGE_TAG" "$ECR_REPO:latest"
           docker push "$ECR_REPO:$IMAGE_TAG"
-          docker push "$ECR_REPO:latest"
+
+          echo "image_uri=$ECR_REPO:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Register server task definition revision
+        id: server-taskdef
+        env:
+          CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
+          SERVER_SERVICE: ${{ steps.infra_out.outputs.server_service }}
+          SERVER_IMAGE: ${{ steps.push-server.outputs.image_uri }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          set -euo pipefail
+
+          CURRENT_TASK_DEF_ARN=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVER_SERVICE" \
+            --region "$AWS_REGION" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          aws ecs describe-task-definition \
+            --task-definition "$CURRENT_TASK_DEF_ARN" \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition' \
+            > server-taskdef.json
+
+          jq --arg IMAGE "$SERVER_IMAGE" '
+            del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )
+            | .containerDefinitions =
+              (.containerDefinitions | map(if .name == "server" then .image = $IMAGE else . end))
+          ' server-taskdef.json > server-taskdef-rendered.json
+
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --region "$AWS_REGION" \
+            --cli-input-json file://server-taskdef-rendered.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "task_def_arn=$NEW_TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Register client task definition revision
+        id: client-taskdef
+        env:
+          CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
+          CLIENT_SERVICE: ${{ steps.infra_out.outputs.client_service }}
+          CLIENT_IMAGE: ${{ steps.push-client.outputs.image_uri }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          set -euo pipefail
+
+          CURRENT_TASK_DEF_ARN=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$CLIENT_SERVICE" \
+            --region "$AWS_REGION" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          aws ecs describe-task-definition \
+            --task-definition "$CURRENT_TASK_DEF_ARN" \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition' \
+            > client-taskdef.json
+
+          jq --arg IMAGE "$CLIENT_IMAGE" '
+            del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )
+            | .containerDefinitions =
+              (.containerDefinitions | map(if .name == "client" then .image = $IMAGE else . end))
+          ' client-taskdef.json > client-taskdef-rendered.json
+
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --region "$AWS_REGION" \
+            --cli-input-json file://client-taskdef-rendered.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "task_def_arn=$NEW_TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
 
       - name: Deploy to ECS Fargate
         env:
           CLUSTER: ${{ steps.infra_out.outputs.cluster_name }}
           SERVER_SERVICE: ${{ steps.infra_out.outputs.server_service }}
           CLIENT_SERVICE: ${{ steps.infra_out.outputs.client_service }}
+          SERVER_TASK_DEF_ARN: ${{ steps.server-taskdef.outputs.task_def_arn }}
+          CLIENT_TASK_DEF_ARN: ${{ steps.client-taskdef.outputs.task_def_arn }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           set -euo pipefail
 
-          aws ecs update-service --cluster "$CLUSTER" --service "$SERVER_SERVICE" --force-new-deployment --region "$AWS_REGION"
-          aws ecs update-service --cluster "$CLUSTER" --service "$CLIENT_SERVICE" --force-new-deployment --region "$AWS_REGION"
+          aws ecs update-service \
+            --cluster "$CLUSTER" \
+            --service "$SERVER_SERVICE" \
+            --task-definition "$SERVER_TASK_DEF_ARN" \
+            --force-new-deployment \
+            --region "$AWS_REGION"
+
+          aws ecs update-service \
+            --cluster "$CLUSTER" \
+            --service "$CLIENT_SERVICE" \
+            --task-definition "$CLIENT_TASK_DEF_ARN" \
+            --force-new-deployment \
+            --region "$AWS_REGION"
 
           for attempt in $(seq 1 30); do
             SERVER_STATUS=$(aws ecs describe-services \
