@@ -10,6 +10,8 @@ RUN npx prisma generate
 FROM node:20-alpine AS runtime
 WORKDIR /app
 
+RUN apk add --no-cache openssl libssl3
+
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 COPY --from=deps /app/node_modules ./node_modules
