@@ -1,6 +1,3 @@
-# ============================================================
-# Terraform Configuration — Professor's Style
-# ============================================================
 terraform {
   required_providers {
     aws = {
